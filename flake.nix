@@ -57,37 +57,5 @@
       overlays.default = final: prev: {
         scrim = self.packages.${final.stdenv.hostPlatform.system}.default;
       };
-      homeManagerModules.default =
-        {
-          config,
-          lib,
-          pkgs,
-          ...
-        }:
-        let
-          cfg = config.services.scrim;
-        in
-        {
-          options.services.scrim = {
-            enable = lib.mkEnableOption "wayland scrim layer";
-            package = lib.mkPackageOption pkgs "scrim" { };
-            # TODO: cmdline related options
-          };
-          config = lib.mkIf cfg.enable {
-            systemd.user.services.scrim = {
-              Unit = {
-                Description = "wayland scrim layer";
-                PartOf = [ "graphical-session.target" ];
-                After = [ "graphical-session.target" ];
-                Requisite = [ "graphical-session.target" ];
-              };
-              Service = {
-                ExecStart = "${cfg.package}/bin/scrim";
-                Restart = "on-failure";
-                RestartSec = 3;
-              };
-            };
-          };
-        };
     };
 }
