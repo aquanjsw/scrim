@@ -32,7 +32,7 @@
       rec {
         packages.default = pkgs.stdenv.mkDerivation {
           pname = "scrim";
-          version = "0.1.0";
+          version = "0.2.0";
           src =
             with (pkgs.lib.fileset);
             toSource {
@@ -70,11 +70,8 @@
         {
           options.services.scrim = {
             enable = lib.mkEnableOption "wayland scrim layer";
-            package = lib.mkOption {
-              type = lib.types.package;
-              default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-              description = "Package to use for the scrim service";
-            };
+            package = lib.mkPackageOption pkgs "scrim" { };
+            # TODO: cmdline related options
           };
           config = lib.mkIf cfg.enable {
             systemd.user.services.scrim = {

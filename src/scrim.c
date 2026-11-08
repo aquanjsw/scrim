@@ -15,6 +15,8 @@
 /*                               declarations                                 */
 /* ========================================================================== */
 
+#define MAX_OUTPUTS 64
+
 struct alphastop {
   float stop;
   float alpha;
@@ -25,6 +27,8 @@ struct config {
   uint32_t color;
   float overflow;
   struct alphastop alphastops[3];
+  char **outputs;
+  uint32_t noutputs;
 };
 
 struct output_state {
@@ -87,10 +91,6 @@ static void registry_handle_global(void *data,
     ostate->name = name;
     wl_list_insert(&state->outputs, &ostate->link);
   }
-
-  if (state->initialized) {
-    create_scrim(state);
-  }
 }
 
 static void registry_handle_global_remove(void *data,
@@ -144,6 +144,87 @@ static void layer_surface_closed(void *data,
 static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
     .configure = layer_surface_configure,
     .closed = layer_surface_closed,
+};
+
+/* --------------------------- output listener ------------------------------ */
+
+static void output_listener_geometry(void *data,
+                                     struct wl_output *output,
+                                     int32_t x,
+                                     int32_t y,
+                                     int32_t physical_width,
+                                     int32_t physical_height,
+                                     int32_t subpixel,
+                                     const char *make,
+                                     const char *model,
+                                     int32_t transform) {}
+
+static void output_listener_scale(void *data,
+                                  struct wl_output *output,
+                                  int32_t factor) {}
+
+static void output_listener_mode(void *data,
+                                 struct wl_output *output,
+                                 uint32_t flags,
+                                 int32_t width,
+                                 int32_t height,
+                                 int32_t refresh) {}
+
+static void output_listener_description(void *data,
+                                        struct wl_output *output,
+                                        const char *description) {}
+
+static void output_listener_done(void *data, struct wl_output *output) {}
+
+static void output_listener_name(void *data,
+                                 struct wl_output *output,
+                                 const char *name) {
+  struct output_state *ostate = data;
+  struct state *state = ostate->state;
+  struct config *cfg = state->cfg;
+
+  if (cfg->noutputs == 0)
+    goto draw;
+
+  bool match = false;
+  for (int i = 0; i < cfg->noutputs; ++i) {
+    if (strcmp(name, cfg->outputs[i]) == 0) {
+      match = true;
+      break;
+    }
+  }
+
+  if (!match)
+    return;
+
+draw:
+  ostate->surface = wl_compositor_create_surface(state->compositor);
+  // No surface listener here as it follows layer_surface's lifecycle
+
+  ostate->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
+      state->layer_shell, ostate->surface, ostate->output,
+      ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM, "scrim");
+  zwlr_layer_surface_v1_add_listener(ostate->layer_surface,
+                                     &layer_surface_listener, ostate);
+
+  zwlr_layer_surface_v1_set_anchor(ostate->layer_surface,
+                                   ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
+                                       ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
+                                       ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+  zwlr_layer_surface_v1_set_exclusive_zone(ostate->layer_surface, -1);
+  zwlr_layer_surface_v1_set_size(ostate->layer_surface, 0,
+                                 cfg->height * (1 + cfg->overflow));
+
+  wl_surface_commit(ostate->surface);
+}
+
+static const struct wl_output_listener output_listener = {
+    .description = output_listener_description,
+    .name = output_listener_name,
+    .done = output_listener_done,
+    .scale = output_listener_scale,
+    .mode = output_listener_mode,
+    .geometry = output_listener_geometry,
 };
 
 /* ========================================================================== */
@@ -220,40 +301,6 @@ static struct wl_buffer *draw(void *data, uint32_t width, uint32_t height) {
   return buffer;
 }
 
-/* ------------------------------ scrim creation ---------------------------- */
-
-static void create_scrim(struct state *state) {
-  struct output_state *ostate, *tmp;
-
-  wl_list_for_each_safe(ostate, tmp, &state->outputs, link) {
-    if (ostate->layer_surface) {
-      continue;
-    }
-
-    struct state *state = ostate->state;
-    struct config *cfg = state->cfg;
-
-    ostate->surface = wl_compositor_create_surface(state->compositor);
-    // No surface listener here as it follows layer_surface's lifecycle
-
-    ostate->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
-        state->layer_shell, ostate->surface, ostate->output,
-        ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM, "scrim");
-    zwlr_layer_surface_v1_add_listener(ostate->layer_surface,
-                                       &layer_surface_listener, ostate);
-
-    zwlr_layer_surface_v1_set_anchor(ostate->layer_surface,
-                                     ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
-                                         ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
-                                         ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
-    zwlr_layer_surface_v1_set_exclusive_zone(ostate->layer_surface, -1);
-    zwlr_layer_surface_v1_set_size(ostate->layer_surface, 0,
-                                   cfg->height * (1 + cfg->overflow));
-
-    wl_surface_commit(ostate->surface);
-  }
-}
-
 /* ---------------------------- argument parsing ---------------------------- */
 
 static int parse_args(struct config *cfg, int argc, char **argv) {
@@ -263,6 +310,7 @@ static int parse_args(struct config *cfg, int argc, char **argv) {
       {"color", required_argument, NULL, 'c'},
       {"overflow", required_argument, NULL, 'o'},
       {"alphas", required_argument, NULL, 'a'},
+      {"outputs", required_argument, NULL, 'O'},
       {"help", no_argument, NULL, 'h'},
       {0, 0, 0, 0},
   };
@@ -277,10 +325,11 @@ static int parse_args(struct config *cfg, int argc, char **argv) {
     "  -o, --overflow=OVF  set overflow, final height: `height*(1+overflow)` (default: 2)\n"
     "  -a, --alphas=STOPS  set alpha stops in format `a0,a1,a2,s1`, s0 and s2 are\n"
     "                      implicitly 0 and 1 respectively (default: .8,.5,.0,.5)\n"
+    "  -O, --outputs=OUTS  set output names to apply scrim to, comma-separated (default: all)\n"
     "  -h, --help          show this help message\n";
   // clang-format on
 
-  while ((c = getopt_long(argc, argv, "H:c:o:a:h", options, NULL)) != -1) {
+  while ((c = getopt_long(argc, argv, "H:c:o:a:O:h", options, NULL)) != -1) {
     if (c == -1)
       break;
     switch (c) {
@@ -302,6 +351,13 @@ static int parse_args(struct config *cfg, int argc, char **argv) {
         cfg->alphastops[2].alpha = atof(token);
         token = strtok(NULL, ",");
         cfg->alphastops[1].stop = atof(token);
+        break;
+      case 'O':
+        token = strtok(optarg, ",");
+        while (token) {
+          cfg->outputs[cfg->noutputs++] = strdup(token);
+          token = strtok(NULL, ",");
+        }
         break;
       case 'h':
         fprintf(stdout, "%s", usage);
@@ -337,6 +393,14 @@ static int parse_args(struct config *cfg, int argc, char **argv) {
            cfg->alphastops[0].stop, cfg->alphastops[0].alpha,
            cfg->alphastops[1].stop, cfg->alphastops[1].alpha,
            cfg->alphastops[2].stop, cfg->alphastops[2].alpha);
+    printf("Outputs: ");
+    if (cfg->noutputs == 0) {
+      printf("all\n");
+    } else {
+      for (uint i = 0; i < cfg->noutputs; ++i) {
+        printf("%s%s", cfg->outputs[i], i + 1 == cfg->noutputs ? "\n" : ", ");
+      }
+    }
   }
 
   return 0;
@@ -358,6 +422,8 @@ int main(int argc, char *argv[]) {
               {0.5, 0.5},
               {1.0, 0.0},
           },
+      .outputs = malloc(MAX_OUTPUTS * sizeof(char *)),
+      .noutputs = 0,
   };
   switch (parse_args(&cfg, argc, argv)) {
     case -1:
@@ -385,9 +451,11 @@ int main(int argc, char *argv[]) {
   wl_registry_add_listener(registry, &registry_listener, &state);
 
   wl_display_roundtrip(display);
-  state.initialized = true;
 
-  create_scrim(&state);
+  struct output_state *ostate, *tmp;
+  wl_list_for_each_safe(ostate, tmp, &state.outputs, link) {
+    wl_output_add_listener(ostate->output, &output_listener, ostate);
+  }
 
   while (wl_display_dispatch(display)) {
   }
